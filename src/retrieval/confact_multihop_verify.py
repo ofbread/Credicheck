@@ -29,6 +29,11 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_AGENT_MODEL = "google/gemini-2.0-flash-001"
 VALID_LABELS = ["SUPPORTS", "REFUTES"]
 
+MAX_RESULTS = 20
+TOP_K = 10
+ALPHA = 0.4
+FILTER_THRESHOLD = 0.55
+
 
 
 CONFACT_LABEL_TEMPLATE = """
@@ -346,64 +351,46 @@ def rows_to_csv(rows: list[dict], out_csv: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CONFACT claim verification with provided evidence baselines.")
+    parser = argparse.ArgumentParser(description="ConFact claim verification.")
     parser.add_argument("--confact-dir", type=Path, default=_PROJECT_ROOT / "data" / "confact")
-    parser.add_argument("--confact-split", choices=["HumC"], default="HumC")
     parser.add_argument("--output-dir", type=Path, default=_PROJECT_ROOT / "outputs" / "retrieval_phase" / "confact")
-    parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument("--num-claims", type=int, default=100, help="Use <=0 for all.")
-    parser.add_argument("--num-examples", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--retrieval-modes",
-        nargs="+",
-        choices=["no_credibility", "raw_search_rank", "reranked", "filtered", "stratified"],
-        default=["no_credibility", "reranked", "filtered"],
-        help="Retrieval baselines to run in this execution.",
-    )
-    parser.add_argument("--max-hops", type=int, default=0, help="Maximum hops per claim (0 = auto, process all evidence chunks).")
-    parser.add_argument("--max-results", type=int, default=20, help="Evidence chunk size per hop.")
-    parser.add_argument("--top-k", type=int, default=10)
-    parser.add_argument("--alpha", type=float, default=0.4)
-    parser.add_argument("--filter-threshold", type=float, default=0.55)
-    parser.add_argument("--agent-model", type=str, default=DEFAULT_AGENT_MODEL)
+    parser.add_argument("--num-claims", type=int, default=100, help="<=0 for all.")
+    parser.add_argument("--retrieval-modes", nargs="+",
+                        choices=["no_credibility", "raw_search_rank", "reranked", "filtered", "stratified"],
+                        default=["no_credibility", "reranked", "filtered"])
     parser.add_argument("--openrouter-api-key", type=str, default=os.environ.get("OPENROUTER_API_KEY", ""))
     parser.add_argument("--credigraph-token", type=str, default=CREDIGRAPH_TOKEN)
-    parser.add_argument("--allow-default-credibility", action="store_true")
-    parser.add_argument("--default-credibility", type=float, default=DEFAULT_CREDIBILITY_SCORE)
-    parser.add_argument("--sleep-per-claim", type=float, default=0.1)
     args = parser.parse_args()
-    if args.num_examples is not None:
-        args.num_claims = args.num_examples
 
     if not args.openrouter_api_key:
-        raise SystemExit("Missing OpenRouter key.")
+        raise SystemExit("Set OPENROUTER_API_KEY.")
     needs_credibility = any(m in {"reranked", "filtered", "stratified"} for m in args.retrieval_modes)
-    if needs_credibility and not args.credigraph_token and not args.allow_default_credibility:
-        raise SystemExit("Missing CrediGraph token; pass --allow-default-credibility for fallback.")
+    if needs_credibility and not args.credigraph_token:
+        raise SystemExit("Set CREDIGRAPH_TOKEN.")
 
     claims = load_confact_claims(
         confact_dir=args.confact_dir,
-        split=args.confact_split,
-        offset=args.offset,
+        split="HumC",
+        offset=0,
         num_claims=args.num_claims,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    scorer = CredibilityScorer(token=args.credigraph_token, default_score=args.default_credibility)
+    scorer = CredibilityScorer(token=args.credigraph_token, default_score=DEFAULT_CREDIBILITY_SCORE)
     if not args.credigraph_token:
         scorer._get_client = lambda: None  # type: ignore[method-assign]
 
     run_summary: dict[str, Any] = {
-        "claims_source": str(args.confact_dir / f"{args.confact_split}.pkl"),
-        "confact_split": args.confact_split,
+        "claims_source": str(args.confact_dir / "HumC.pkl"),
+        "confact_split": "HumC",
         "num_claims": len(claims),
         "retrieval_modes": args.retrieval_modes,
-        "max_hops": args.max_hops,
-        "max_results": args.max_results,
-        "top_k": args.top_k,
-        "agent_model": args.agent_model,
-        "alpha": args.alpha,
-        "filter_threshold": args.filter_threshold,
+        "max_hops": 0,
+        "max_results": MAX_RESULTS,
+        "top_k": TOP_K,
+        "agent_model": DEFAULT_AGENT_MODEL,
+        "alpha": ALPHA,
+        "filter_threshold": FILTER_THRESHOLD,
         "mode_summaries": {},
     }
 
@@ -418,9 +405,9 @@ def main() -> None:
             print(f"[{idx}/{len(claims)}] claim_id={claim.id}")
             try:
                 raw_results = build_raw_results_from_evidence(claim.evidence)
-                auto_hops = math.ceil(len(raw_results) / max(1, args.max_results)) if raw_results else 0
-                effective_max_hops = auto_hops if args.max_hops <= 0 else args.max_hops
-                hop_chunks = chunk_raw_results(raw_results, args.max_results, effective_max_hops)
+                auto_hops = math.ceil(len(raw_results) / max(1, MAX_RESULTS)) if raw_results else 0
+                effective_max_hops = auto_hops if 0 <= 0 else 0
+                hop_chunks = chunk_raw_results(raw_results, MAX_RESULTS, effective_max_hops)
                 searches: list[dict[str, Any]] = []
                 selected_all: list[dict[str, Any]] = []
                 for hop_idx, hop_raw in enumerate(hop_chunks, start=1):
@@ -428,9 +415,9 @@ def main() -> None:
                         raw_results=hop_raw,
                         scorer=scorer,
                         mode=retrieval_mode,
-                        alpha=args.alpha,
-                        threshold=args.filter_threshold,
-                        top_k=args.top_k,
+                        alpha=ALPHA,
+                        threshold=FILTER_THRESHOLD,
+                        top_k=TOP_K,
                     )
                     selected_all.extend(selected)
                     hop_summary = format_raw_evidence(selected)
@@ -448,7 +435,7 @@ def main() -> None:
                 selected_dedup = dedup_selected(selected_all)
                 evidence_summary = format_raw_evidence(selected_dedup)
                 prediction, _raw_model_output, final_response = predict_label(
-                    verifier_model=args.agent_model,
+                    verifier_model=DEFAULT_AGENT_MODEL,
                     openrouter_api_key=args.openrouter_api_key,
                     claim=claim.text,
                     evidence_summary=evidence_summary,
@@ -478,8 +465,8 @@ def main() -> None:
             if claim.label in VALID_LABELS:
                 y_true.append(claim.label)  # type: ignore[arg-type]
                 y_pred.append(rec["prediction"])
-            if args.sleep_per_claim > 0:
-                time.sleep(args.sleep_per_claim)
+            if 0.1 > 0:
+                time.sleep(0.1)
 
         with open(jsonl_path, "w", encoding="utf-8") as f:
             for r in results:

@@ -470,7 +470,6 @@ def openrouter_chat(
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    # Control reasoning/thinking tokens for models that support it (e.g., Gemini 3).
     if reasoning_effort is not None:
         payload["reasoning"] = {"effort": reasoning_effort}
     last_error: Exception | None = None
@@ -510,8 +509,6 @@ def parse_final_label(text: str, label_space: list[str]) -> str | None:
         candidate = m.group(1).strip().upper().replace(" ", "_")
         if candidate in label_space:
             return candidate
-    # Fallback: find the LAST mention of any valid label in the text.
-    # Fallback for truncated responses
     label_pattern = r"\b(" + "|".join(re.escape(l) for l in label_space) + r")\b"
     matches = re.findall(label_pattern, text, re.IGNORECASE)
     if matches:
@@ -522,73 +519,23 @@ def parse_final_label(text: str, label_space: list[str]) -> str | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generation-phase credibility integration: few-shot CoT with credibility labels."
-    )
-    parser.add_argument("--root-dir", type=Path, default=_PROJECT_ROOT)
+    parser = argparse.ArgumentParser(description="Generation-phase credibility integration.")
     parser.add_argument("--output-dir", type=Path, default=OUTPUTS / "generation_phase")
-    parser.add_argument(
-        "--datasets", nargs="+",
-        default=["climate_fever", "scifact", "confact"],
-        choices=list(DATASETS.keys()),
-    )
-    parser.add_argument(
-        "--evidence-source",
-        type=str,
-        default="no_credibility",
-        choices=["no_credibility", "reranked", "filtered", "stratified"],
-        help="Which retrieval mode's selected evidences to use.",
-    )
-    parser.add_argument("--mode-name", type=str, default="credibility_generation",
-                        help="Mode tag for output files.")
+    parser.add_argument("--datasets", nargs="+", default=["climate_fever", "scifact", "confact"],
+                        choices=list(DATASETS.keys()))
+    parser.add_argument("--evidence-source", type=str, default="no_credibility",
+                        choices=["no_credibility", "reranked", "filtered", "stratified"])
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
-    parser.add_argument("--openrouter-api-key", type=str,
-                        default=os.environ.get("OPENROUTER_API_KEY", ""))
-    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--openrouter-api-key", type=str, default=os.environ.get("OPENROUTER_API_KEY", ""))
     parser.add_argument("--num-claims", type=int, default=100, help="<=0 for all.")
-    parser.add_argument("--sleep", type=float, default=0.2)
-    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=1024)
-    parser.add_argument(
-        "--credibility-mode",
-        type=str,
-        default="continuous_only",
-        choices=["continuous_only", "blind", "random",
-                 "relevance_gated", "pmc_aware", "combined"],
-        help=(
-            "How to present credibility in prompts. "
-            "continuous_only: HIGH/MEDIUM/LOW/UNRATED labels from continuous score. "
-            "blind: no credibility info shown (Axis 2 baseline). "
-            "random: shuffled credibility scores within each claim (ablation). "
-            "relevance_gated: continuous + tangentiality-aware few-shot example and instructions. "
-            "pmc_aware: continuous + PMC/PubMed peer-review annotation in instructions. "
-            "combined: relevance_gated + pmc_aware together."
-        ),
-    )
-    parser.add_argument(
-        "--json-mode",
-        action="store_true",
-        default=False,
-        help="Use JSON response_format for structured output parsing.",
-    )
-    parser.add_argument(
-        "--credibility-corrections",
-        type=Path,
-        default=None,
-        help="Path to JSON file mapping domain -> corrected credibility score.",
-    )
-    parser.add_argument(
-        "--reasoning-effort",
-        type=str,
-        default="none",
-        choices=["none", "minimal", "low", "medium", "high"],
-        help=(
-            "Control reasoning/thinking tokens for models that support it (Gemini 3, etc.). "
-            "Thinking tokens count against max_tokens. 'none' disables thinking entirely. "
-            "Default: 'none' to keep max_tokens fully available for the response."
-        ),
-    )
+    parser.add_argument("--credibility-mode", type=str, default="continuous_only",
+                        choices=["continuous_only", "blind", "random",
+                                 "relevance_gated", "pmc_aware", "combined"])
+    parser.add_argument("--credibility-corrections", type=Path, default=None,
+                        help="JSON file mapping domain -> corrected score.")
     args = parser.parse_args()
+    args.mode_name = "credibility_generation"
 
     if not args.openrouter_api_key:
         raise SystemExit("Missing --openrouter-api-key.")
@@ -601,7 +548,7 @@ def main() -> None:
         }
         print(f"Loaded {len(_cred_corrections)} credibility corrections from {args.credibility_corrections}")
 
-    retrieval_base = args.root_dir / "outputs" / "retrieval_phase"
+    retrieval_base = _PROJECT_ROOT / "outputs" / "retrieval_phase"
 
     run_output_base = args.output_dir / args.evidence_source / sanitize_model_for_path(args.model)
     run_output_base.mkdir(parents=True, exist_ok=True)
@@ -626,8 +573,6 @@ def main() -> None:
             continue
 
         records = load_jsonl(pred_path)
-        if args.offset > 0:
-            records = records[args.offset:]
         if args.num_claims > 0:
             records = records[:args.num_claims]
 
@@ -675,8 +620,6 @@ def main() -> None:
                     is_default = abs(new_score - 0.35) < 0.01
                     ev["credibility_label"] = credibility_label(new_score, is_default=is_default)
 
-            # random/relevance_gated/pmc_aware/combined all use continuous evidence formatting
-            # (credibility labels shown); only blind uses the blind format
             if args.credibility_mode == "blind":
                 prompt_mode = "blind"
             else:
@@ -691,10 +634,8 @@ def main() -> None:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=args.temperature,
+                    temperature=0.0,
                     max_tokens=args.max_tokens,
-                    json_mode=args.json_mode,
-                    reasoning_effort=args.reasoning_effort,
                 )
                 prediction = parse_final_label(response_text, label_space)
                 if prediction is None:
@@ -724,8 +665,7 @@ def main() -> None:
                 y_true.append(claim_label)
                 y_pred.append(prediction)
 
-            if args.sleep > 0:
-                time.sleep(args.sleep)
+            time.sleep(0.2)
 
         metrics = f1_stats(y_true, y_pred, label_space)
 

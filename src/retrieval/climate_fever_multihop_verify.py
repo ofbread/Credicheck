@@ -45,6 +45,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_AGENT_MODEL = "google/gemini-2.0-flash-001"
 VALID_LABELS = ["SUPPORTS", "REFUTES", "NOT_ENOUGH_INFO"]
 
+MAX_HOPS = 5
+MAX_RESULTS = 20
+TOP_K = 10
+ALPHA = 0.4
+FILTER_THRESHOLD = 0.55
+
 
 SYSTEM_PROMPT = """You are a claim verification assistant with web search access.
 Use multi-hop search to verify a climate-related claim.
@@ -372,7 +378,6 @@ def search_evidence_multihop(
                     raw = _search(query)
                     raw_cache[query] = raw
                 queries_used.append(query)
-                # Show agent evidence in neutral rank-only format
                 neutral_selected = apply_retrieval_mode(
                     results=raw, scorer=scorer, mode="no_credibility",
                     alpha=0.0, threshold=0.0, top_k=top_k,
@@ -503,46 +508,33 @@ def predict_with_evidence(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Climate-FEVER multi-hop verification with Serper + OpenRouter.")
+    parser = argparse.ArgumentParser(description="Climate-FEVER multi-hop verification.")
     parser.add_argument("--claims-csv", type=Path, default=_PROJECT_ROOT / "data" / "climate_fever_subset" / "clean_claims.csv")
     parser.add_argument("--output-dir", type=Path, default=_PROJECT_ROOT / "outputs" / "retrieval_phase" / "climate_fever")
-    parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument("--num-claims", type=int, default=100, help="Use <=0 for all.")
-    parser.add_argument(
-        "--retrieval-modes",
-        nargs="+",
-        default=["no_credibility", "reranked", "stratified"],
-        choices=["no_credibility", "raw_search_rank", "reranked", "filtered", "stratified"],
-        help="Retrieval modes to evaluate. All share the same evidence from one search pass.",
-    )
-    parser.add_argument("--max-hops", type=int, default=5)
-    parser.add_argument("--max-results", type=int, default=20)
-    parser.add_argument("--top-k", type=int, default=10)
-    parser.add_argument("--alpha", type=float, default=0.4)
-    parser.add_argument("--filter-threshold", type=float, default=0.55)
-    parser.add_argument("--agent-model", type=str, default=DEFAULT_AGENT_MODEL)
+    parser.add_argument("--num-claims", type=int, default=100, help="<=0 for all.")
+    parser.add_argument("--retrieval-modes", nargs="+",
+                        default=["no_credibility", "reranked", "stratified"],
+                        choices=["no_credibility", "raw_search_rank", "reranked", "filtered", "stratified"])
     parser.add_argument("--openrouter-api-key", type=str, default=os.environ.get("OPENROUTER_API_KEY", ""))
     parser.add_argument("--serper-api-key", type=str, default=SERPER_API_KEY)
     parser.add_argument("--credigraph-token", type=str, default=CREDIGRAPH_TOKEN)
-    parser.add_argument("--allow-default-credibility", action="store_true")
-    parser.add_argument("--default-credibility", type=float, default=DEFAULT_CREDIBILITY_SCORE)
     args = parser.parse_args()
 
     if not args.openrouter_api_key:
-        raise SystemExit("Missing OpenRouter key. Set --openrouter-api-key or OPENROUTER_API_KEY.")
+        raise SystemExit("Set OPENROUTER_API_KEY.")
     if not args.serper_api_key:
-        raise SystemExit("Missing Serper API key. Set --serper-api-key or SERPER_API_KEY.")
+        raise SystemExit("Set SERPER_API_KEY.")
     needs_credibility = any(m in {"reranked", "filtered", "stratified"} for m in args.retrieval_modes)
-    if needs_credibility and not args.credigraph_token and not args.allow_default_credibility:
-        raise SystemExit("Missing CrediGraph token; pass --allow-default-credibility to use fallback.")
+    if needs_credibility and not args.credigraph_token:
+        raise SystemExit("Set CREDIGRAPH_TOKEN.")
 
-    claims = load_claims(args.claims_csv, args.offset, args.num_claims)
+    claims = load_claims(args.claims_csv, 0, args.num_claims)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    scorer = CredibilityScorer(token=args.credigraph_token, default_score=args.default_credibility)
+    scorer = CredibilityScorer(token=args.credigraph_token, default_score=DEFAULT_CREDIBILITY_SCORE)
     if not args.credigraph_token:
         scorer._get_client = lambda: None  # type: ignore[method-assign]
 
-    _search_fn = lambda q: serper_search(q, api_key=args.serper_api_key, max_results=args.max_results)
+    _search_fn = lambda q: serper_search(q, api_key=args.serper_api_key, max_results=MAX_RESULTS)
     print(f"Using Serper search. Output: {args.output_dir}")
 
     # ---- Phase A ----
@@ -557,11 +549,11 @@ def main() -> None:
         search_result = search_evidence_multihop(
             claim=claim,
             openrouter_key=args.openrouter_api_key,
-            agent_model=args.agent_model,
+            agent_model=DEFAULT_AGENT_MODEL,
             scorer=scorer,
-            max_hops=args.max_hops,
-            max_results=args.max_results,
-            top_k=args.top_k,
+            max_hops=MAX_HOPS,
+            max_results=MAX_RESULTS,
+            top_k=TOP_K,
             raw_cache=claim_raw_cache,
             search_fn=_search_fn,
         )
@@ -582,7 +574,6 @@ def main() -> None:
         y_pred: list[str] = []
 
         for i, claim in enumerate(claims, start=1):
-            # Pool all raw evidence from this claim's search
             claim_raw_cache = raw_cache_by_claim.get(claim.id, {})
             query_plan = query_plan_by_claim.get(claim.id, [])
             all_raw: list[dict] = []
@@ -593,15 +584,14 @@ def main() -> None:
                 claim=claim,
                 retrieval_mode=mode,
                 openrouter_key=args.openrouter_api_key,
-                agent_model=args.agent_model,
+                agent_model=DEFAULT_AGENT_MODEL,
                 scorer=scorer,
-                top_k=args.top_k,
-                alpha=args.alpha,
-                threshold=args.filter_threshold,
+                top_k=TOP_K,
+                alpha=ALPHA,
+                threshold=FILTER_THRESHOLD,
                 all_raw_results=all_raw,
                 query_plan=query_plan,
             )
-            # Store search hop count from Phase A for reference
             rec["num_hops"] = search_hops_by_claim.get(claim.id, 0)
             results.append(rec)
             if claim.label in VALID_LABELS:
@@ -644,12 +634,12 @@ def main() -> None:
         "claims_csv": str(args.claims_csv),
         "num_claims": len(claims),
         "retrieval_modes": args.retrieval_modes,
-        "alpha": args.alpha,
-        "filter_threshold": args.filter_threshold,
-        "max_hops": args.max_hops,
-        "max_results": args.max_results,
-        "top_k": args.top_k,
-        "agent_model": args.agent_model,
+        "alpha": ALPHA,
+        "filter_threshold": FILTER_THRESHOLD,
+        "max_hops": MAX_HOPS,
+        "max_results": MAX_RESULTS,
+        "top_k": TOP_K,
+        "agent_model": DEFAULT_AGENT_MODEL,
         "freeze_retrieval_comparison": True,
         "mode_summaries": all_mode_summaries,
     }

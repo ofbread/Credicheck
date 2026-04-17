@@ -62,10 +62,6 @@ def choose_weighted_label(
             return "REFUTES", weighted_sum, counts
         return label_space[0], weighted_sum, counts
 
-    # Tie-break order:
-    # 1) larger weighted score
-    # 2) larger raw count
-    # 3) label_space order for deterministic output
     label_rank = {label: idx for idx, label in enumerate(label_space)}
     best = max(
         label_space,
@@ -237,91 +233,19 @@ def _extract_url_scores_from_jsonl(path: Path) -> dict[str, float]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Credibility-weighted aggregation using cached single-evidence predictions. "
-            "No API calls are made."
-        )
-    )
-    parser.add_argument(
-        "--evidence-source",
-        type=str,
-        default="no_credibility",
-        choices=["no_credibility", "reranked", "filtered", "stratified"],
-        help="Which retrieval mode's single-evidence summary to use.",
-    )
-    parser.add_argument(
-        "--summary-json",
-        type=Path,
-        default=None,
-        help="Path to single-evidence summary JSON. Default: summary_{source}.json under aggregation_phase/single_evidence.",
-    )
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=OUTPUTS / "aggregation_phase" / "evaluation",
-        help="Root output directory; one subdirectory per dataset.",
-    )
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=["climate_fever", "scifact", "confact"],
-        help="Subset of datasets to process.",
-    )
-    parser.add_argument(
-        "--mode-name",
-        type=str,
-        default="credibility_weighted",
-        help="Retrieval mode tag written into outputs.",
-    )
-    parser.add_argument(
-        "--default-credibility",
-        type=float,
-        default=DEFAULT_CREDIBILITY_SCORE,
-        help="Fallback credibility when cached value is missing/non-finite.",
-    )
-    parser.add_argument(
-        "--credibility-power",
-        type=float,
-        default=1.0,
-        help="Weight transform: weight = max(0, credibility)^power.",
-    )
-    parser.add_argument(
-        "--adaptive-power",
-        action="store_true",
-        default=False,
-        help="Use adaptive per-claim power selection based on credibility gap between label groups.",
-    )
-    parser.add_argument(
-        "--margin-gated",
-        action="store_true",
-        default=False,
-        help="Only apply credibility weighting when margin between top labels is meaningful.",
-    )
-    parser.add_argument(
-        "--margin-threshold",
-        type=float,
-        default=0.12,
-        help="Credibility margin threshold for margin-gated mode.",
-    )
-    parser.add_argument(
-        "--tiered-consensus",
-        action="store_true",
-        default=False,
-        help="Use tiered consensus: separate HIGH/LOW tier voting with structured combination.",
-    )
-    parser.add_argument(
-        "--informative-only",
-        action="store_true",
-        default=False,
-        help="Filter out NEI single-evidence predictions before aggregation (keep only informative evidence).",
-    )
-    parser.add_argument(
-        "--conflict-only-weighting",
-        action="store_true",
-        default=False,
-        help="Apply credibility weighting only when non-NEI evidence conflicts (both S and R present). Use uniform weights otherwise.",
-    )
+    parser = argparse.ArgumentParser(description="Credibility-weighted aggregation (no API calls).")
+    parser.add_argument("--evidence-source", type=str, default="no_credibility",
+                        choices=["no_credibility", "reranked", "filtered", "stratified"])
+    parser.add_argument("--summary-json", type=Path, default=None)
+    parser.add_argument("--output-root", type=Path, default=OUTPUTS / "aggregation_phase" / "evaluation")
+    parser.add_argument("--datasets", nargs="+", default=["climate_fever", "scifact", "confact"])
+    parser.add_argument("--mode-name", type=str, default="credibility_weighted")
+    parser.add_argument("--credibility-power", type=float, default=1.0)
+    parser.add_argument("--adaptive-power", action="store_true", default=False)
+    parser.add_argument("--margin-gated", action="store_true", default=False)
+    parser.add_argument("--tiered-consensus", action="store_true", default=False)
+    parser.add_argument("--informative-only", action="store_true", default=False)
+    parser.add_argument("--conflict-only-weighting", action="store_true", default=False)
     args = parser.parse_args()
 
     if args.credibility_power <= 0:
@@ -347,7 +271,7 @@ def main() -> None:
         "summary_json": str(args.summary_json),
         "datasets": args.datasets,
         "mode_name": args.mode_name,
-        "default_credibility": float(args.default_credibility),
+        "default_credibility": float(DEFAULT_CREDIBILITY_SCORE),
         "credibility_power": float(args.credibility_power),
         "dataset_summaries": {},
     }
@@ -410,27 +334,27 @@ def main() -> None:
                 pred, weighted_sum, counts = choose_label_adaptive_power(
                     evidences=evidences,
                     label_space=label_space,
-                    default_credibility=float(args.default_credibility),
+                    default_credibility=float(DEFAULT_CREDIBILITY_SCORE),
                 )
             elif args.margin_gated:
                 pred, weighted_sum, counts = choose_label_margin_gated(
                     evidences=evidences,
                     label_space=label_space,
-                    default_credibility=float(args.default_credibility),
+                    default_credibility=float(DEFAULT_CREDIBILITY_SCORE),
                     credibility_power=float(args.credibility_power),
-                    margin_threshold=float(args.margin_threshold),
+                    margin_threshold=0.12,
                 )
             elif args.tiered_consensus:
                 pred, weighted_sum, counts = choose_label_tiered_consensus(
                     evidences=evidences,
                     label_space=label_space,
-                    default_credibility=float(args.default_credibility),
+                    default_credibility=float(DEFAULT_CREDIBILITY_SCORE),
                 )
             else:
                 pred, weighted_sum, counts = choose_weighted_label(
                     evidences=evidences,
                     label_space=label_space,
-                    default_credibility=float(args.default_credibility),
+                    default_credibility=float(DEFAULT_CREDIBILITY_SCORE),
                     credibility_power=effective_power,
                 )
 
@@ -482,7 +406,7 @@ def main() -> None:
             "summary_json": str(args.summary_json),
             "num_claims": len(rows),
             "retrieval_modes": [args.mode_name],
-            "default_credibility": float(args.default_credibility),
+            "default_credibility": float(DEFAULT_CREDIBILITY_SCORE),
             "credibility_power": float(args.credibility_power),
             "mode_summaries": {
                 args.mode_name: {

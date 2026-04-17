@@ -183,88 +183,21 @@ def collect_selected_evidences_as_items(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Single-evidence predictions over *selected* evidences for one retrieval mode; "
-            "output summary for credibility_weighted_aggregation_verify.py."
-        )
-    )
-    parser.add_argument("--root-dir", type=Path, default=_PROJECT_ROOT)
-    parser.add_argument(
-        "--retrieval-mode",
-        type=str,
-        choices=list(RETRIEVAL_MODES),
-        required=True,
-        help="Which predictions_*.jsonl to read (selected evidences).",
-    )
-    parser.add_argument(
-        "--openrouter-api-key",
-        type=str,
-        default="",
-        help="OpenRouter key. Falls back to OPENROUTER_API_KEY env var.",
-    )
+    parser = argparse.ArgumentParser(description="Single-evidence predictions for aggregation.")
+    parser.add_argument("--retrieval-mode", type=str, choices=list(RETRIEVAL_MODES), required=True)
+    parser.add_argument("--openrouter-api-key", type=str, default="")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=30,
-        help="Request timeout in seconds.",
-    )
-    parser.add_argument("--retries", type=int, default=3)
-    parser.add_argument("--sleep-seconds", type=float, default=0.0)
-    parser.add_argument("--search-engine", type=str, default="serper",
-                        help="Which search engine's retrieval results to read.")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=OUTPUTS / "aggregation_phase" / "single_evidence",
-    )
-    parser.add_argument(
-        "--summary-file",
-        type=str,
-        default="",
-        help="Summary JSON file name inside output-dir. Default: summary_{retrieval_mode}.json",
-    )
-    parser.add_argument(
-        "--cache-file",
-        type=str,
-        default="",
-        help="Cache file name inside output-dir. Default: single_evidence_selected_{mode}_cache.jsonl",
-    )
-    parser.add_argument(
-        "--dataset-averages-file",
-        type=str,
-        default="",
-        help="Optional dataset averages JSON. Default: dataset_averages_selected_{mode}.json",
-    )
-    parser.add_argument(
-        "--claim-metrics-csv",
-        type=str,
-        default="",
-        help="Optional claim metrics CSV. Default: claim_metrics_selected_{mode}.csv",
-    )
-    parser.add_argument("--max-evidences", type=int, default=0, help="0 = all.")
-    parser.add_argument("--max-claims-per-dataset", type=int, default=0, help="0 = all.")
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=["climate_fever", "scifact", "confact"],
-    )
-    parser.add_argument("--default-credibility", type=float, default=DEFAULT_CREDIBILITY_SCORE)
-    parser.add_argument(
-        "--no-progress",
-        action="store_true",
-        help="Disable stderr progress bar for evidence processing.",
-    )
+    parser.add_argument("--output-dir", type=Path, default=OUTPUTS / "aggregation_phase" / "single_evidence")
+    parser.add_argument("--datasets", nargs="+", default=["climate_fever", "scifact", "confact"])
     args = parser.parse_args()
 
     openrouter_key = resolve_openrouter_api_key(args.openrouter_api_key)
 
     mode = args.retrieval_mode
-    summary_name = args.summary_file or f"summary_{mode}.json"
-    cache_name = args.cache_file or f"single_evidence_selected_{mode}_cache.jsonl"
-    averages_name = args.dataset_averages_file or f"dataset_averages_selected_{mode}.json"
-    metrics_csv_name = args.claim_metrics_csv or f"claim_metrics_selected_{mode}.csv"
+    summary_name = f"summary_{mode}.json"
+    cache_name = f"single_evidence_selected_{mode}_cache.jsonl"
+    averages_name = f"dataset_averages_selected_{mode}.json"
+    metrics_csv_name = f"claim_metrics_selected_{mode}.csv"
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -273,7 +206,7 @@ def main() -> None:
     dataset_averages_path = output_dir / averages_name
     claim_metrics_csv_path = output_dir / metrics_csv_name
 
-    dataset_paths = build_dataset_paths(args.root_dir, search_engine=args.search_engine)
+    dataset_paths = build_dataset_paths(_PROJECT_ROOT)
     pred_paths: dict[str, Path] = {}
     records_by_dataset: dict[str, dict[str, dict[str, Any]]] = {}
 
@@ -298,18 +231,14 @@ def main() -> None:
     for dataset, id_map in records_by_dataset.items():
         n = 0
         for claim_id, rec in id_map.items():
-            if args.max_claims_per_dataset > 0 and n >= args.max_claims_per_dataset:
-                break
             n += 1
             total_claims += 1
             total_evidences += len(
                 collect_selected_evidences_as_items(
                     rec,
-                    default_credibility=args.default_credibility,
+                    default_credibility=DEFAULT_CREDIBILITY_SCORE,
                 )
             )
-    if args.max_evidences > 0:
-        total_evidences = min(total_evidences, args.max_evidences)
 
     cache: dict[str, dict[str, Any]] = {}
     if cache_path.exists():
@@ -334,7 +263,7 @@ def main() -> None:
     cache_hits = 0
     claim_metrics_rows: list[dict[str, Any]] = []
 
-    if not args.no_progress and total_evidences > 0:
+    if total_evidences > 0:
         print(
             f"Progress: {total_evidences} evidence items across {len(records_by_dataset)} dataset(s), "
             f"mode={mode}",
@@ -361,15 +290,13 @@ def main() -> None:
         for claim_id, rec in id_map.items():
             if args.max_claims_per_dataset > 0 and claims_processed >= args.max_claims_per_dataset:
                 break
-            if args.max_evidences > 0 and processed_evidences >= args.max_evidences:
-                break
 
             claim = str(rec.get("claim", ""))
             gold = str(rec.get("claim_label", "")).upper()
             dataset_gold_counter[gold] += 1
             evidences = collect_selected_evidences_as_items(
                 rec,
-                default_credibility=args.default_credibility,
+                default_credibility=DEFAULT_CREDIBILITY_SCORE,
             )
 
             cred_scores = [e.credibility_score for e in evidences if e.credibility_score is not None]
@@ -393,8 +320,8 @@ def main() -> None:
                         user_prompt=prompt,
                         temperature=0.0,
                         max_tokens=512,
-                        timeout=args.timeout,
-                        retries=args.retries,
+                        timeout=30,
+                        retries=3,
                     )
                     label = parse_label(raw, labels)
                     cache_obj = {
@@ -409,18 +336,15 @@ def main() -> None:
                     with cache_path.open("a", encoding="utf-8") as cf:
                         cf.write(json.dumps(cache_obj, ensure_ascii=False) + "\n")
                     total_calls += 1
-                    if args.sleep_seconds > 0:
-                        time.sleep(args.sleep_seconds)
 
                 processed_evidences += 1
-                if not args.no_progress:
-                    evidence_progress(
-                        processed_evidences,
-                        total_evidences,
-                        desc=f"evidences[{mode}]",
-                        dataset=dataset,
-                        claim_id=claim_id,
-                    )
+                evidence_progress(
+                    processed_evidences,
+                    total_evidences,
+                    desc=f"evidences[{mode}]",
+                    dataset=dataset,
+                    claim_id=claim_id,
+                )
                 pred_counter[label] += 1
                 dataset_label_counter[label] += 1
                 pred_by_gold[gold][label] += 1
@@ -555,7 +479,7 @@ def main() -> None:
             "claims": claim_entries,
         }
 
-    if not args.no_progress and total_evidences > 0:
+    if total_evidences > 0:
         evidence_progress_done()
 
     overall_summary["run_stats"] = {
