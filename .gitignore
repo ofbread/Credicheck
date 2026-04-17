@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# Data and outputs 
+data/
+outputs/
+
+
